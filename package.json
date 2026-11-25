@@ -1,0 +1,22 @@
+{
+  "name": "krx-flow",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "dev": "node --watch --env-file=.env src/server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@fastify/cors": "^11.4.3",
+    "fastify": "^5.12.8",
+    "ioredis": "^6.1.0",
+    "node-cron": "^4.6.0",
+    "pg": "^8.23.1",
+    "ws": "^8.23.0"
+  }
+}
