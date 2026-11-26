@@ -60,7 +60,7 @@ async function callKiwoomApi(apiId, path, payload, forceSign = 0, maxItems = 100
   let nextKey = '';
   let page = 0;
 
-  while (page < 4 && collected.length < maxItems) {
+  while (page < 6 && collected.length < maxItems) {
     const { data, respContYn, respNextKey } = await scheduleKiwoomRequest(async () => {
       const res = await fetch(`${process.env.KIWOOM_BASE_URL}${path}`, {
         method: 'POST',
@@ -167,6 +167,11 @@ async function fetchInvestorByAmount(kstCompactDate, invsrTp, isBuy, maxItems = 
       maxItems
     ),
   ]);
+  if (!kospi.length) {
+    await sleep(320);
+    const retryKospi = await callKiwoomApi("ka10058", "/api/dostk/stkinfo", { strt_dt: kstCompactDate, end_dt: kstCompactDate, trde_tp: trdeTp, mrkt_tp: "001", invsr_tp: invsrTp, stex_tp: "3" }, sign, maxItems);
+    return [...retryKospi, ...kosdaq];
+  }
   return [...kospi, ...kosdaq];
 }
 
@@ -432,10 +437,18 @@ export async function pollAllRankings() {
       const price = live?.price || it.price;
       const changeRate = live?.changeRate ?? it.changeRate;
       let netAmt = it.netAmt;
-      if (!it.hasExactAmt && netAmt === 0 && it.netQty !== 0 && price > 0) {
-        netAmt = Math.round((it.netQty * price) / 1_000_000);
+      let netQty = it.netQty;
+      if (it.hasExactAmt && netAmt !== 0 && price > 0) {
+        const expectedQty = Math.round((netAmt * 1_000_000) / price);
+        if (netQty === 0 || Math.abs(expectedQty / netQty) >= 10) {
+          netQty = expectedQty;
+        }
       }
-      return { ...it, price, changeRate, netAmt };
+      if (!it.hasExactAmt && netAmt === 0 && netQty !== 0 && price > 0) {
+        const calc = Math.round((it.netQty * price) / 1_000_000);
+        netAmt = calc !== 0 ? calc : Math.sign(it.netQty);
+      }
+      return { ...it, price, changeRate, netAmt, netQty };
     });
 
     const sorted = hydrated
@@ -444,6 +457,77 @@ export async function pollAllRankings() {
       .slice(0, 100);
 
     results[k] = await attachRankDiffAndSave(k, updatedAt, sorted);
+  }
+
+  // 20초 단위 3주체(외국인·기관·개인) 장중 변화 추이 타임라인 기록
+  try {
+    const kstDate = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Seoul' });
+    const snapMap = new Map();
+    const bucketKeys = ['foreign:buy', 'foreign:sell', 'inst:buy', 'inst:sell', 'indiv:buy', 'indiv:sell'];
+
+    for (const bk of bucketKeys) {
+      for (const it of results[bk]?.items || []) {
+        if (!snapMap.has(it.ticker)) {
+          snapMap.set(it.ticker, {
+            ticker: it.ticker,
+            name: it.name,
+            price: it.price || 0,
+            changeRate: it.changeRate || 0,
+            foreignNet: 0,
+            instNet: 0,
+            indivNet: 0,
+          });
+        }
+        const row = snapMap.get(it.ticker);
+        if (bk.startsWith('foreign:')) row.foreignNet = it.netAmt;
+        if (bk.startsWith('inst:')) row.instNet = it.netAmt;
+        if (bk.startsWith('indiv:')) row.indivNet = it.netAmt;
+        if (!row.price && it.price) row.price = it.price;
+      }
+    }
+
+    let totalForeign = 0;
+    let totalInst = 0;
+    let totalIndiv = 0;
+    const compactStocks = {};
+
+    for (const s of snapMap.values()) {
+      totalForeign += s.foreignNet;
+      totalInst += s.instNet;
+      totalIndiv += s.indivNet;
+      compactStocks[s.ticker] = [s.foreignNet, s.instNet, s.indivNet, s.price, s.changeRate, s.name];
+    }
+
+    const prevLatestRaw = await redis.get(`intraday:latest:${kstDate}`);
+    const prevStocks = prevLatestRaw ? JSON.parse(prevLatestRaw).stocks || {} : {};
+
+    const latestStocksWithDelta = {};
+    for (const s of snapMap.values()) {
+      const prev = prevStocks[s.ticker];
+      latestStocksWithDelta[s.ticker] = {
+        ...s,
+        deltaForeign: prev ? s.foreignNet - prev.foreignNet : 0,
+        deltaInst: prev ? s.instNet - prev.instNet : 0,
+        deltaIndiv: prev ? s.indivNet - prev.indivNet : 0,
+      };
+    }
+
+    const timelinePoint = JSON.stringify({
+      time: updatedAt,
+      totalForeign,
+      totalInst,
+      totalIndiv,
+      stocks: compactStocks,
+    });
+
+    const timelineKey = `intraday:timeline:${kstDate}`;
+    const latestKey = `intraday:latest:${kstDate}`;
+    await redis.rpush(timelineKey, timelinePoint);
+    await redis.ltrim(timelineKey, -2200, -1);
+    await redis.expire(timelineKey, 60 * 60 * 36);
+    await redis.set(latestKey, JSON.stringify({ updatedAt, stocks: latestStocksWithDelta }), 'EX', 60 * 60 * 36);
+  } catch (snapErr) {
+    console.warn('[Intraday Snapshot] 기록 경고:', snapErr.message);
   }
 
   await pubRedis.publish('channel:rank_update', JSON.stringify({ updatedAt, session: getMarketSession() }));
