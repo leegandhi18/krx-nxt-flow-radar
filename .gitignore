@@ -1,19 +1,10 @@
-# 환경 변수 및 증권사 API 키 (절대 커밋 금지)
 .env
 .env.*
 !.env.example
-
-# 백업 압축 파일 (내부 .env 유출 방지)
 *.zip
-
-# 의존성 및 빌드 산출물
 node_modules/
 web/node_modules/
 dist/
 web/dist/
-
-# 로그 및 OS 임시 파일
 *.log
-npm-debug.log*
 .DS_Store
-Thumbs.db
